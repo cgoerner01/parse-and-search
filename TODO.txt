@@ -1,0 +1,43 @@
+- check haystack components for document cleaner (also pre-processors)
+- extract metadata at index time? https://docs.haystack.deepset.ai/docs/metadata-filtering 
+- enable multiple search terms
+- create logger
+
+Metadata enrichment:
+https://docs.haystack.deepset.ai/docs/llmmetadataextractor
+Then filtering:
+https://docs.haystack.deepset.ai/docs/metadata-filtering
+
+Retriever:
+- use combined retriever https://docs.haystack.deepset.ai/docs/retrievers#advanced-retriever-techniques
+- use multi-query retrieval? (MultiQueryTextRetriever, MultiQueryEmbeddingRetriever)
+- do we want a semantic search pipeline or extractive QA pipeline?
+
+-embedding dimension als constant
+- top k als constant
+- document chunks wieder auf ganze dokumente mergen
+- schauen ob das pydantic metadata model richtig an Ollama übergeben wird
+- "metadata" zu "structured data" oder so umbenennen
+
+[HIER]
+- du bist beim erstellen der indexer api abgestorben, siehe claude
+- du brauchst dann auch noch einen api client für die app
+- how do i make it write to the log
+
+
+- export und import von pgdump
+-> siehe chatgpt "Streamlit Postgres Dump"
+-> custom paradedb container
+-> muss noch pip3 installieren i think
+-> docker compose anpassen, dass der das richtig buildet und so
+
+- services in eigene container packen -> API-ify (uvicorn = FASTApi)
+- config-ify um verschiedene setups zu ermöglichen (anderes embedding modell, anderes OCR, metadatenextractor welches modell gemma,llama, ...)
+    - wie viele relevante docling setups gibt es (runterschreiben für Constantin) -> eine config für jedes relevante docling setups (nicht nur OCR)
+    - die 4 intfloat modelle in configs packen (verschiedene größen), aber überlegen ob es noch andere relevante für deutsch gibt und auf dem laptop ausführbar sind < 0.6b parameter, über MTEB schauen
+    - dasselbe für ollama extractor(<=3b) -> schauen welche modelle structured outputs können, aufschreiben welche ins setup passen aber structured output nicht können
+-> zur evaluation und dann in ein paper
+-> CS überlegt sich saubere Fragestellung nach der evaluiert wird
+
+- eine Sicherheitskopie von diesem Projekt machen
+- Beas Texte einlesen!

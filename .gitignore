@@ -1,0 +1,12 @@
+.env
+app/indexed_docs
+app/uploaded_files
+indexed_docs
+data
+converter/app/preprocessed
+converter/app/outputs
+converter/app/uploads
+converter/app/rapidocr_models
+indexer/app/converted
+*.pyc
+app/converted_files.zip

@@ -1,0 +1,136 @@
+version: "3.9"
+
+services:
+  streamlit:
+    image: medical_document_parsing-streamlit:latest
+    build:
+      context: ./app
+      dockerfile: Dockerfile
+    container_name: hybridsearch_app
+    ports:
+      - "8502:8501"
+    env_file:
+      - .env
+    depends_on:
+      - paradedb
+      - ollama
+    volumes:
+      - ./app:/app  # optional: hot reload in dev
+      - ollama_models:/root/.ollama
+      - document_data:/data
+    networks:
+      - api_net
+    restart: unless-stopped
+  
+  converter:
+    image: medical_document_parsing-converter:latest
+    build:
+      context: ./converter
+      dockerfile: Dockerfile
+    container_name: converter
+    ports:
+      - "8002:8002"
+    env_file:
+      - .env
+    volumes:
+      - ./converter/app:/app
+      - document_data:/data
+      #- ./data/uploads:/app/uploads
+      #- ./data/outputs:/app/outputs
+      #- ./data/preprocessed:/app/preprocessed
+      #- rapidocr_models:${RAPIDOCR_MOUNTED_MODELS_PATH}:ro
+    networks:
+      - api_net
+    restart: unless-stopped
+
+  indexer:
+    image: medical_document_parsing-indexer:latest
+    build:
+      context: ./indexer
+      dockerfile: Dockerfile
+    container_name: indexer
+    ports:
+      - "8003:8003"
+    env_file:
+      - .env
+    volumes:
+      - ./indexer/app:/app
+      #- ./data/outputs:/app/outputs
+      - document_data:/data
+    depends_on:
+      - paradedb
+    networks:
+      - api_net
+    restart: unless-stopped
+
+  paradedb:
+    image: medical_document_parsing-paradedb:latest
+    build:
+      context: ./database
+      dockerfile: Dockerfile
+    container_name: paradedb_container
+    ports:
+      - "8001:8001"
+      - "${PG_PORT_EXTERNAL}:${PG_PORT_INTERNAL}"
+    env_file:
+      - .env
+    environment:
+      POSTGRES_USER: ${PG_USER}
+      POSTGRES_PASSWORD: ${PG_PASSWORD}
+      POSTGRES_DB: ${PG_DB}
+    volumes:
+      - paradedb_data:/var/lib/postgresql
+    networks:
+      - api_net
+
+  #rapidocr-model-downloader:
+  #  image: python:3.10-slim
+  #  container_name: rapidocr_model_downloader
+  #  env_file:
+  #    - .env
+  #  volumes:
+  #    - rapidocr_models:${RAPIDOCR_DOWNLOAD_DIR}
+  #    - ./scripts:/scripts
+  #  command: >
+  #    bash -c "
+  #    pip install modelscope &&
+  #    python /scripts/download_rapidocr_models.py
+  #    "
+
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    ports:
+      - "11434:11434"
+    env_file:
+      - .env
+    volumes:
+      - ollama_models:/root/.ollama
+    networks:
+      - api_net
+    entrypoint: []
+    command: >
+      sh -c "
+      ollama serve &
+      until ollama list; do sleep 1; done &&
+      ollama list | grep -q ${OLLAMA_MODEL} || ollama pull ${OLLAMA_MODEL} &&
+      wait
+      "
+    restart: unless-stopped
+
+networks:
+  api_net:
+
+volumes:
+  paradedb_data:
+  ollama_models:
+  document_data:
+
+# docker compose build --no-cache
+# docker compose up -d --no-build
+# docker compose stop
+
+# if you want to reset everything and remove all containers and volumes:
+# docker compose down -v
+
+# docker compose up -d --build

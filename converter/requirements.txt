@@ -1,0 +1,23 @@
+fastapi==0.128.0
+uvicorn[standard]==0.40.0
+python-multipart==0.0.21
+pydantic==2.12.5
+pydantic-settings==2.12.0
+
+#RapidOCR
+onnxruntime==1.23.2
+sentence_transformers==5.2.0
+modelscope==1.34.0
+
+# Docling dependencies
+docling==2.70.0
+docling-haystack==0.1.1
+
+# OCR and image processing
+opencv-python==4.12.0.88
+pillow==11.3.0
+pdf2image==1.17.0
+numpy==2.2.6
+
+# Optional: for better performance
+# torch>=2.0.0  # Uncomment if using VLM pipeline
