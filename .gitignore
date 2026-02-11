@@ -10,3 +10,4 @@ converter/app/rapidocr_models
 indexer/app/converted
 *.pyc
 app/converted_files.zip
+TODO.txt
