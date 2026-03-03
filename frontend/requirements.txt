@@ -10,5 +10,8 @@ pdf2image==1.17.0
 Pillow==11.3.0
 python_Levenshtein==0.27.3
 streamlit==1.52.2
+streamlit-pdf==2.0.1
+streamlit-scrollable-textbox==0.0.3
 onnxruntime==1.23.2
 sentence_transformers==5.2.0
+PyMuPDF==1.26.7

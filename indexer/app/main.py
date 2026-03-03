@@ -188,7 +188,7 @@ async def health_check():
 async def index_documents_from_text(
     background_tasks: BackgroundTasks,
     documents: List[DocumentUploadRequest],
-    pipeline_type: Literal["simple", "metadata_extractor"] = "simple",
+    pipeline_type: Literal["simple", "metadata_extractor"] = Form(default="simple"),
     recreate_table: bool = False
 ):
     """
@@ -231,7 +231,7 @@ async def index_documents_from_text(
         job_id,
         haystack_docs,
         pipeline_type,
-        document_store_config
+        None
     )
     
     return IndexResponse(
@@ -246,7 +246,7 @@ async def index_documents_from_text(
 async def index_documents_from_files(
     background_tasks: BackgroundTasks,
     files: List[UploadFile] = File(..., description="Text files from conversion (.txt)"),
-    pipeline_type: Literal["simple", "metadata_extractor"] = "simple",
+    pipeline_type: Literal["simple", "metadata_extractor"] = Form(default="simple"),
     document_store_config: Optional[str] = Form(None, description="JSON string of IndexDocumentStoreConfig")
 ):
     """

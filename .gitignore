@@ -1,6 +1,7 @@
 .env
-app/indexed_docs
-app/uploaded_files
+frontend/indexed_docs
+frontend/uploaded_files
+frontend/converted_files.zip
 indexed_docs
 data
 converter/app/preprocessed
@@ -9,5 +10,4 @@ converter/app/uploads
 converter/app/rapidocr_models
 indexer/app/converted
 *.pyc
-app/converted_files.zip
 TODO.txt

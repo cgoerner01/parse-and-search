@@ -6,8 +6,9 @@ from haystack.components.embedders import (
     SentenceTransformersDocumentEmbedder,
     SentenceTransformersTextEmbedder,
 )
-from haystack.components.builders import PromptBuilder
-from haystack_integrations.components.generators.ollama import OllamaGenerator
+from haystack.components.builders import ChatPromptBuilder
+from haystack.dataclasses import ChatMessage
+from haystack_integrations.components.generators.ollama import OllamaChatGenerator
 from haystack.components.preprocessors import DocumentSplitter
 from haystack.components.writers import DocumentWriter
 from haystack_integrations.document_stores.pgvector import PgvectorDocumentStore
@@ -44,10 +45,14 @@ import logging
 loggers = [logging.getLogger(name) for name in logging.root.manager.loggerDict]
 for logger in loggers:
     logger.setLevel(logging.DEBUG)
+logger = logging.getLogger(__name__)
 
 EMBED_MODEL_ID = os.getenv("EMBED_MODEL_ID", "intfloat/multilingual-e5-large-instruct")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "gemma3:1b")
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://ollama:11434")
+OLLAMA_TEMPERATURE = float(os.getenv("OLLAMA_TEMPERATURE", "0.0"))
+OLLAMA_NUM_CTX = int(os.getenv("OLLAMA_NUM_CTX", "32768"))
+OLLAMA_TIMEOUT = int(os.getenv("OLLAMA_TIMEOUT", "360"))
 EXPORT_TYPE = ExportType.DOC_CHUNKS
 
 # pydantic metadata model
@@ -60,7 +65,6 @@ class ReportMetadata(BaseModel):
     icd_codes: Optional[list[str]]
     medikation: Optional[list[str]]
     eingriffe: Optional[list[str]]
-    konfidenz: Optional[Dict[str, Literal["hoch", "medium", "niedrig"]]]
 
 
 @component
@@ -68,13 +72,10 @@ class MetadataExtractor:
     # https://docs.haystack.deepset.ai/docs/llmmetadataextractor exists, but does not support OllamaGenerator (Jan 2026)
     # https://haystack.deepset.ai/blog/extracting-metadata-filter
     def __init__(self):
-        self.prompt = """
-            Du bist ein System zur Extraktion medizinischer Informationen. Extrahiere strukturierte Daten aus diesem Befundtext.
+        self.system_prompt = ChatMessage.from_system("""
+            Du bist ein System zur Extraktion medizinischer Informationen aus Befundtexten und Arztbriefen. Extrahiere strukturierte Daten aus diesem Befundtext.
 
             Der OCR-Text kann Fehler, fehlende Informationen oder Formatierungsprobleme enthalten. Gib dein Bestes, um so viel wie möglich zu extrahieren.
-
-            Befundtext:
-            {{ document_text }}
 
             Extrahiere die folgenden Informationen im JSON-Format:
             {
@@ -86,50 +87,64 @@ class MetadataExtractor:
             "icd_codes": ["Liste der ICD-10 codes falls präsent"],
             "medikation": ["Liste der Medikamente"],
             "eingriffe": ["Liste der durchgeführten Eingriffe"],
-            "konfidenz": {
-                "entlassungsdatum": "hoch/medium/niedrig",
-                "diagnosen": "hoch/medium/niedrig"
-            }
             }
 
             Wichtig:
+            - Es gibt meistens ein bis zwei Diagnosen.
+            - Es gibt meistens mehrere Vordiagnosen. Manchmal stehen sie in einem gesonderten Abschnitt, manchmal werden sie mit "Z.n." (Zustand nach) gekennzeichnet.
             - Verwende null für alle Felder, die du nicht finden kannst
             - Konvertiere Datumsangaben in das Format JJJJ-MM-TT
-            - Füge Konfidenzstufen für kritische Felder hinzu
-            - Wenn der Text aufgrund von OCR-Fehlern unklar ist, markiere die Konfidenz als "niedrig"
+
 
             Gib nur JSON als Antwort ohne zusätzliche Erklärungen oder Text.
-        """
+        """)
+        self.user_prompt = ChatMessage.from_user("""
+            Befundtext:
+            {{ document_text }}
+        """)
 
         self.pipeline = Pipeline()
-        self.builder = PromptBuilder(self.prompt)
-        self.llm = OllamaGenerator(
+        self.builder = ChatPromptBuilder()
+        self.llm = OllamaChatGenerator(
             url=OLLAMA_URL,
             model=OLLAMA_MODEL,
+            timeout=OLLAMA_TIMEOUT,
+            response_format=ReportMetadata.model_json_schema(),
             generation_kwargs={
-                "format": json.dumps(ReportMetadata.model_json_schema()),
+                "temperature": OLLAMA_TEMPERATURE,
+                "num_ctx": OLLAMA_NUM_CTX,
             }
         )
         self.pipeline.add_component(name="builder", instance=self.builder)
         self.pipeline.add_component(name="llm", instance=self.llm)
-        self.pipeline.connect("builder", "llm")
+        self.pipeline.connect("builder.prompt", "llm.messages")
     
-    @component.output_types(metadata=List[Document])
+    @component.output_types(documents=List[Document])
     def run(self, documents: List[Document]):
         #TODO: document chunks wieder auf ganze dokumente mergen
         results = []
         for doc in documents:
             result = self.pipeline.run(
                 {
-                    "builder": {"document_text": doc.content}
+                    "builder": {
+                        "template_variables": {
+                             "document_text": doc.content,
+                        },
+                        "template": [self.system_prompt, self.user_prompt],
+                    }
                 }
             )
-            response_text = result["llm"]["replies"][0]
+            response = result["llm"]["replies"][0]
+            logger.info(f"ChatMessage result dir: {dir(response)}")
             try:
-                metadata = json.loads(response_text)
+                logger.info(f"LLM response for document {doc.meta.get('file_name', 'unknown')}: {response.text}")
+                # remove leading and trailing text around the JSON
+                #response_text = response_text[response_text.find("{"):]
+                #response_text = response_text[:response_text.rfind("}")+1] 
+                metadata = json.loads(response.text)
             except json.JSONDecodeError:
                 print("JSON decode error, setting metadata to default nulls")
-                metadata = json.loads('{"patient_id": null, "entlassungsdatum": null, "aufnahmedatum": null, "diagnosen": [], "icd_codes": [], "medikation": [], "eingriffe": [], "konfidenz": {}}')
+                metadata = json.loads('{"patient_id": null, "entlassungsdatum": null, "aufnahmedatum": null, "diagnosen": [], "icd_codes": [], "medikation": [], "eingriffe": []}')
             results.append(Document(
                 content=doc.content,
                 meta={**doc.meta, "extracted_metadata": metadata}
@@ -185,6 +200,7 @@ class DoclingIndexerService:
             )
     
     def init_simple_pipeline(self):
+        logger.info("Initializing simple indexing pipeline")
         self.entry_component = "embedder"
         self.idx_pipe = Pipeline()
 
@@ -208,6 +224,7 @@ class DoclingIndexerService:
         self.idx_pipe.connect("embedder", "writer")
 
     def init_metadata_extractor_pipeline(self):
+        logger.info("Initializing metadata extractor pipeline")
         self.entry_component = "metadata_extractor"
         self.idx_pipe = Pipeline()
 

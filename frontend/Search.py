@@ -1,5 +1,6 @@
 import streamlit as st
 from services.searching import HybridSearchService
+from services.searcher_api_client import SearchAPIClient, SearchTerm
 from haystack import Document
 from typing import List
 from pathlib import Path
@@ -173,9 +174,13 @@ search_button = st.button(label="Search")
 
 if search_button:
     st.write(f"You searched for: {st.session_state['search_terms']}")
-    search_service = HybridSearchService(keyword_weight=keyword_weight, semantic_weight=semantic_weight)
+    #search_service = HybridSearchService(keyword_weight=keyword_weight, semantic_weight=semantic_weight)
+    search_service = SearchAPIClient()
     with st.spinner("Searching..."):
-        results = search_service.search(search_terms=st.session_state["search_terms"])
+        #results = search_service.search(search_terms=st.session_state["search_terms"])
+        results = search_service.search(
+            search_terms=[SearchTerm(term=entry["term"], polarity=entry["polarity"], value=entry["value"]) for entry in st.session_state["search_terms"]]
+        )
     st.write("Search Results:")
     #st.write(results)
     

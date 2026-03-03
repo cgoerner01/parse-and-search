@@ -39,7 +39,7 @@ class PDFConverterAPIClient:
     def convert_pdfs(
         self,
         pdf_paths: List[Path],
-        pipeline_type: Literal["rapidocr", "tesseract", "easyocr", "vlm"] = "rapidocr",
+        pipeline_type: Literal["rapidocr", "suryaocr", "tesseract", "easyocr", "docling_easyocr", "vlm"] = "rapidocr",
         wait: bool = False,
         poll_interval: float = 2.0,
         timeout: Optional[float] = None
@@ -74,6 +74,7 @@ class PDFConverterAPIClient:
                 files=files,
                 params={'pipeline_type': pipeline_type}
             )
+            print(response.text)
             response.raise_for_status()
             
             data = response.json()

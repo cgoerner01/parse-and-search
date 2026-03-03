@@ -128,6 +128,8 @@ async def process_conversion(
     try:
         logging.getLogger("haystack").debug("HAYSTACK DEBUG TEST")
         print("PRINT TEST")
+        print(f"pipeline_type: {pipeline_type}")
+        print(pipeline_type == "rapidocr")
         jobs_db[job_id]["status"] = "processing"
         
         # Create job-specific output directory
@@ -147,15 +149,20 @@ async def process_conversion(
         # Initialize appropriate pipeline
         if pipeline_type == "rapidocr":
             service.init_rapidocr_pipeline()
+        elif pipeline_type == "suryaocr":
+            service.init_surya_pipeline()
         elif pipeline_type == "tesseract":
             service.init_tesseract_pipeline()
         elif pipeline_type == "easyocr":
             service.init_easyocr_pipeline()
+        elif pipeline_type == "docling_easyocr":
+            service.init_docling_easyocr_pipeline()
         elif pipeline_type == "vlm":
             service.init_vlm_pipeline()
         else:
             raise ValueError(f"Unknown pipeline type: {pipeline_type}")
         
+        print("after pipeline init")
         # Run conversion
         result = service.convert_documents(file_paths)
         
@@ -204,7 +211,7 @@ async def health_check():
 async def convert_pdfs(
     background_tasks: BackgroundTasks,
     files: List[UploadFile] = File(..., description="PDF files to convert"),
-    pipeline_type: Literal["rapidocr", "tesseract", "easyocr", "vlm"] = "rapidocr"
+    pipeline_type: Literal["rapidocr", "suryaocr", "tesseract", "easyocr", "docling_easyocr", "vlm"] = "rapidocr"
 ):
     """
     Upload and convert PDF files using the specified pipeline.
@@ -212,8 +219,10 @@ async def convert_pdfs(
     - **files**: One or more PDF files to convert
     - **pipeline_type**: Type of conversion pipeline
         - `rapidocr`: Standard OCR pipeline with RapidOCR
+        - `suryaocr`: OCR pipeline using SuryaOCR
         - `tesseract`: OCR pipeline using Tesseract
         - `easyocr`: OCR pipeline using EasyOCR
+        - `docling_easyocr`: OCR pipeline using Docling's EasyOCR integration
         - `vlm`: Vision Language Model pipeline
     
     Returns a job_id that can be used to check status and download results.

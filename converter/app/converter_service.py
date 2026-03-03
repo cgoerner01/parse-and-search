@@ -6,6 +6,8 @@ import os
 from pathlib import Path
 from docling_haystack.converter import DoclingConverter, ExportType
 from haystack import Pipeline, Document
+from haystack.components.preprocessors import DocumentCleaner, DocumentSplitter
+from haystack import component
 
 from docling.chunking import HybridChunker
 
@@ -22,7 +24,7 @@ from docling.backend.pypdfium2_backend import PyPdfiumDocumentBackend
 
 from docling.pipeline.vlm_pipeline import VlmPipeline
 
-from haystack import component
+from docling_surya import SuryaOcrOptions
 
 from collections import defaultdict
 
@@ -36,6 +38,13 @@ from pdf2image import convert_from_path
 from typing import Iterable, Union, List
 
 from modelscope import snapshot_download
+
+from rapidocr import EngineType, LangDet, LangRec, ModelType, OCRVersion, RapidOCR
+
+from surya.models import load_predictors
+from surya.common.surya.schema import TaskNames
+
+import fitz
 
 import logging
 
@@ -64,7 +73,10 @@ class TextFileSaver:
                 # TODO: this doesn't work for the VLM pipeline
                 source = doc.meta["dl_meta"]["meta"]["origin"]["filename"]
             except KeyError:
-                source = "unknown"
+                try:
+                    source = doc.meta["source"]
+                except KeyError:
+                    source = "unknown"
             grouped[source].append(doc.content)
 
         for source_file, contents in grouped.items():
@@ -206,6 +218,97 @@ class Deskewer:
         
         return {"paths": output_paths}
 
+@component
+class RapidOCRConverter:
+    """Component to convert PDFs using RapidOCR."""
+
+    def __init__(self, preprocess_dir: str = None):
+        self.preprocess_dir = preprocess_dir
+        self.engine = RapidOCR(
+            params={
+                "Det.engine_type": EngineType.ONNXRUNTIME,
+                "Det.lang_type": LangDet.MULTI,
+                "Det.model_type": ModelType.MOBILE,
+                "Det.ocr_version": OCRVersion.PPOCRV4,
+                "Rec.engine_type": EngineType.ONNXRUNTIME,
+                "Rec.lang_type": LangRec.LATIN,
+                "Rec.model_type": ModelType.MOBILE,
+                "Rec.ocr_version": OCRVersion.PPOCRV5,
+            }
+        )
+    
+    @component.output_types(documents=list[Document])
+    def run(self, paths: List[Path]):
+        results = []
+        for path in paths:
+            pages = []
+            with fitz.open(path) as doc:
+                for page in doc:
+                    pix = page.get_pixmap(dpi=300)
+                    img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+                    res = self.engine(img)
+                    visualization = Image.fromarray(res.vis(Path(self.preprocess_dir) / f"vis_{path.stem}_page{page.number+1}.jpg"))
+                    w, h = visualization.size
+                    visualization = visualization.crop((0, 0, w//2, h))  # Crop to left half to remove bounding boxes
+                    visualization.save(Path(self.preprocess_dir) / f"vis_{path.stem}_page{page.number+1}.jpg")
+                    pages.append(res)
+                results.append(pages)
+        
+        output_docs = []
+        for res, path in zip(results, paths):
+            output_docs.append(
+                Document(
+                    content="\n".join([page.to_markdown() for page in res if hasattr(page, 'to_markdown')]),
+                    meta={"source": str(Path(path).name)},
+                )
+            )
+        
+        return {"documents": output_docs}
+
+@component
+class SuryaOCRConverter:
+    """Component to convert PDFs using SuryaOCR."""
+    
+    def __init__(self, preprocess_dir: str = None):
+        self.preprocess_dir = preprocess_dir
+        self.predictors = load_predictors()
+    
+    @component.output_types(documents=list[Document])
+    def run(self, paths: List[Path]):
+        results = []
+        for path in paths:
+            pages = []
+            with fitz.open(path) as doc:
+                for page in doc:
+                    pix = page.get_pixmap(dpi=300)
+                    img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+                    res = self.predictors["recognition"](
+                        [img],
+                        task_names=[TaskNames.ocr_with_boxes],
+                        bboxes=None,
+                        det_predictor=self.predictors["detection"],
+                        highres_images=None,
+                        math_mode=True,
+                        return_words=True
+                    )[0]
+                    #visualization = Image.fromarray(res[0].vis(Path(self.preprocess_dir) / f"vis_{path.stem}_page{page.number+1}.jpg"))
+                    #w, h = visualization.size
+                    #visualization = visualization.crop((0, 0, w//2, h))  # Crop to left half to remove bounding boxes
+                    #visualization.save(Path(self.preprocess_dir) / f"vis_{path.stem}_page{page.number+1}.jpg")
+                    pages.append(res)
+                results.append(pages)
+
+        output_docs = []
+        for res, path in zip(results, paths):
+            output_docs.append(
+                Document(
+                    content = '\n'.join(['\n'.join([line.text for line in page.text_lines]) for page in res]),
+                    meta={"source": str(Path(path).name)},
+                )
+            )
+        
+        return {"documents": output_docs}
+
 
 class DoclingConvertingService:
     """
@@ -236,6 +339,7 @@ class DoclingConvertingService:
 
     def init_rapidocr_pipeline(self):
         """Initialize OCR pipeline with RapidOCR."""
+        """
         self.download_rapidocr_models()
 
         det_model_path = os.path.join(
@@ -250,12 +354,14 @@ class DoclingConvertingService:
         
         ocr_options = RapidOcrOptions(
             force_full_page_ocr=True,
+            bitmap_area_threshold=0.0,  # Adjust as needed
             det_model_path=det_model_path,
             rec_model_path=rec_model_path,
             cls_model_path=cls_model_path,
         )
         
         self.pipeline_options = PdfPipelineOptions(
+            do_ocr=True,
             ocr_options=ocr_options,
         )
 
@@ -275,12 +381,75 @@ class DoclingConvertingService:
                 chunker=HybridChunker(tokenizer=EMBED_MODEL_ID, max_tokens=512),
             ),
         )
+        """
+
+        self.convert_pipe.add_component(
+            "converter",
+            RapidOCRConverter(preprocess_dir=self.preprocess_dir),
+        )
 
         self.convert_pipe.add_component(
             "file_saver",
             TextFileSaver(output_dir=self.output_dir),
         )
 
+        #self.convert_pipe.add_component(
+        #    "cleaner",
+        #    DocumentCleaner(),
+        #)
+        #   
+        #self.convert_pipe.add_component(
+        #    "splitter",
+        #    DocumentSplitter(split_by="word", split_length=384, split_overlap=10),
+        #)
+
+        self.convert_pipe.connect("converter", "file_saver")
+        #self.convert_pipe.connect("file_saver", "cleaner")
+        #self.convert_pipe.connect("cleaner", "splitter")
+    
+    def init_surya_pipeline(self):
+        """Initialize OCR pipeline with SuryaOCR."""
+        """
+        surya_options = SuryaOcrOptions(
+            lang=["de"],
+        )
+        self.pipeline_options = PdfPipelineOptions(
+            do_ocr=True,
+            ocr_model="suryaocr",
+            allow_external_plugins=True,
+            ocr_options=surya_options,
+            bitmap_area_threshold=0.0,  # Adjust as needed
+        )
+
+        self.doc_converter = DocumentConverter(
+            format_options={
+                InputFormat.PDF: PdfFormatOption(pipeline_options=self.pipeline_options),
+            }
+        )
+
+        self.convert_pipe.add_component(
+            "converter",
+            DoclingConverter(
+                converter=self.doc_converter,
+                export_type=EXPORT_TYPE,
+                chunker=HybridChunker(tokenizer=EMBED_MODEL_ID, max_tokens=512),
+            ),
+        )
+
+        self.convert_pipe.add_component(
+            "file_saver",
+            TextFileSaver(output_dir=self.output_dir),
+        )
+        """
+        self.convert_pipe.add_component(
+            "converter",
+            SuryaOCRConverter(preprocess_dir=self.preprocess_dir),
+        )
+
+        self.convert_pipe.add_component(
+            "file_saver",
+            TextFileSaver(output_dir=self.output_dir),
+        )
         self.convert_pipe.connect("converter", "file_saver")
     
     def init_macocr_pipeline(self):
@@ -319,8 +488,43 @@ class DoclingConvertingService:
 
         self.convert_pipe.connect("converter", "file_saver")
     
+    def init_docling_easyocr_pipeline(self):
+        """Initialize OCR pipeline with Docling's EasyOCR integration."""
+        self.pipeline_options = PdfPipelineOptions()
+        self.pipeline_options.do_ocr = True
+        self.pipeline_options.ocr_options = EasyOcrOptions(
+            force_full_page_ocr=True,
+            lang=["de"],
+        )
+        self.pipeline_options.do_table_structure = True
+        self.pipeline_options.table_structure_options.do_cell_matching = True
+
+        self.doc_converter = DocumentConverter(
+            format_options={
+                InputFormat.PDF: PdfFormatOption(
+                    pipeline_options=self.pipeline_options
+                ),
+            },
+        )
+
+        self.convert_pipe.add_component(
+            "converter",
+            DoclingConverter(
+                converter=self.doc_converter,
+                export_type=EXPORT_TYPE,
+                chunker=HybridChunker(tokenizer=EMBED_MODEL_ID, max_tokens=512),
+            ),
+        )
+
+        self.convert_pipe.add_component(
+            "file_saver",
+            TextFileSaver(output_dir=self.output_dir),
+        )
+
+        self.convert_pipe.connect("converter", "file_saver")
+    
     def init_easyocr_pipeline(self):
-        """Initialize OCR pipeline with EasyOCR."""
+        """Initialize OCR pipeline with EasyOCR and PyPdfium backend."""
         self.pipeline_options = PdfPipelineOptions()
         self.pipeline_options.do_ocr = True
         self.pipeline_options.ocr_options = EasyOcrOptions(
@@ -433,6 +637,8 @@ class DoclingConvertingService:
         )
 
         self.convert_pipe.connect("converter", "file_saver")
+    
+    
 
     def convert_documents(self, paths: List[Path]):
         """

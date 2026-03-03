@@ -1,10 +1,6 @@
-- check haystack components for document cleaner (also pre-processors)
-- extract metadata at index time? https://docs.haystack.deepset.ai/docs/metadata-filtering 
-- enable multiple search terms
-- create logger
-
 Metadata enrichment:
 https://docs.haystack.deepset.ai/docs/llmmetadataextractor
+- extract metadata at index time? https://docs.haystack.deepset.ai/docs/metadata-filtering 
 Then filtering:
 https://docs.haystack.deepset.ai/docs/metadata-filtering
 
@@ -20,10 +16,19 @@ Retriever:
 - "metadata" zu "structured data" oder so umbenennen
 
 [HIER]
-- du bist beim erstellen der indexer api abgestorben, siehe claude
-- du brauchst dann auch noch einen api client für die app
-- how do i make it write to the log
+- logging verbessern
+- integrate Surya OCR
+- indexing metadata extractor:
+    - umbenennen
+    - fix temperature
+- make GUI like Surya OCR
+- show progress
+- auto detect language feature (and then propagate to every other component)
 
+- EVALUIERUNG
+- constrain to extraction only (keine prediction von ICD codes)
+- download die extrahierten infos
+- wie kann die conversion quality evaluiert werden?
 
 - export und import von pgdump
 -> siehe chatgpt "Streamlit Postgres Dump"
@@ -38,6 +43,3 @@ Retriever:
     - dasselbe für ollama extractor(<=3b) -> schauen welche modelle structured outputs können, aufschreiben welche ins setup passen aber structured output nicht können
 -> zur evaluation und dann in ein paper
 -> CS überlegt sich saubere Fragestellung nach der evaluiert wird
-
-- eine Sicherheitskopie von diesem Projekt machen
-- Beas Texte einlesen!

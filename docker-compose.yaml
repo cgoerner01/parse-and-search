@@ -1,12 +1,12 @@
 version: "3.9"
 
 services:
-  streamlit:
-    image: medical_document_parsing-streamlit:latest
+  frontend:
+    image: medical_document_parsing-frontend:latest
     build:
-      context: ./app
+      context: ./frontend
       dockerfile: Dockerfile
-    container_name: hybridsearch_app
+    container_name: frontend
     ports:
       - "8502:8501"
     env_file:
@@ -15,7 +15,7 @@ services:
       - paradedb
       - ollama
     volumes:
-      - ./app:/app  # optional: hot reload in dev
+      - ./frontend:/app  # optional: hot reload in dev
       - ollama_models:/root/.ollama
       - document_data:/data
     networks:
@@ -62,15 +62,34 @@ services:
     networks:
       - api_net
     restart: unless-stopped
+  
+  searcher:
+    image: medical_document_parsing-searcher:latest
+    build:
+      context: ./searcher
+      dockerfile: Dockerfile
+    container_name: searcher
+    ports:
+      - "8004:8004"
+    env_file:
+      - .env
+    volumes:
+      - ./searcher/app:/app
+    depends_on:
+      - paradedb
+    networks:
+      - api_net
+    restart: unless-stopped
 
   paradedb:
-    image: medical_document_parsing-paradedb:latest
-    build:
-      context: ./database
-      dockerfile: Dockerfile
+    #image: medical_document_parsing-paradedb:latest
+    #build:
+    #  context: ./database
+    #  dockerfile: Dockerfile
+    image: paradedb/paradedb:latest
     container_name: paradedb_container
     ports:
-      - "8001:8001"
+      #- "8001:8001"
       - "${PG_PORT_EXTERNAL}:${PG_PORT_INTERNAL}"
     env_file:
       - .env
