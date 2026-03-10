@@ -17,7 +17,8 @@ from docling.datamodel.pipeline_options import (
     TesseractOcrOptions,
     EasyOcrOptions,
     VlmPipelineOptions,
-    RapidOcrOptions
+    RapidOcrOptions,
+    OcrMacOptions
 )
 from docling.document_converter import DocumentConverter, PdfFormatOption, ImageFormatOption, ConversionResult
 from docling.backend.pypdfium2_backend import PyPdfiumDocumentBackend
@@ -456,9 +457,9 @@ class DoclingConvertingService:
         """Initialize OCR pipeline with MacOCR."""
         self.pipeline_options = PdfPipelineOptions()
         self.pipeline_options.do_ocr = True
-        self.pipeline_options.ocr_options = MacOcrOptions(
+        self.pipeline_options.ocr_options = OcrMacOptions(
             force_full_page_ocr=True,
-            lang=["de"],
+            lang=["de-DE"],
         )
         self.pipeline_options.do_table_structure = True
         self.pipeline_options.table_structure_options.do_cell_matching = True
@@ -482,11 +483,26 @@ class DoclingConvertingService:
         )
 
         self.convert_pipe.add_component(
+            "cleaner",
+            DocumentCleaner(
+                remove_substrings=[
+                    "999999 Elektronisches Dokument",
+                    "Keine Archivierung des Ausdrucks am UKHD"
+                ],
+                replace_regexes={
+                    r'Ausdruck aus.* Unterbelegart:.*(riefe|richte)' : '',
+                    r'Gedruckte Seiten.*Datum: \d{2}\.\d{2}\.\d{4}' : '',
+                }
+            ),
+        )
+
+        self.convert_pipe.add_component(
             "file_saver",
             TextFileSaver(output_dir=self.output_dir),
         )
 
-        self.convert_pipe.connect("converter", "file_saver")
+        self.convert_pipe.connect("converter", "cleaner")
+        self.convert_pipe.connect("cleaner", "file_saver")
     
     def init_docling_easyocr_pipeline(self):
         """Initialize OCR pipeline with Docling's EasyOCR integration."""

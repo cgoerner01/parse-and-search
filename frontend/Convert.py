@@ -8,9 +8,9 @@ import os
 import io
 import fitz
 
-INDEXED_DOCS_PATH = os.getenv("INDEXED_DOCS_PATH", "./indexed_docs")
-UPLOADED_FILES_PATH = os.getenv("UPLOADED_FILES_PATH", "./uploaded_files")
-PREPROCESSED_FILES_PATH = os.getenv("PREPROCESSED_FILES_PATH", "./preprocessed_files")
+INDEXED_DOCS_PATH = os.getenv("INDEXED_DOCS_PATH", Path(os.getcwd()).resolve().parent / "converter" / "app" / "outputs")
+UPLOADED_FILES_PATH = os.getenv("UPLOADED_FILES_PATH", Path(os.getcwd()).resolve().parent / "converter" / "app" / "uploads")
+PREPROCESSED_FILES_PATH = os.getenv("PREPROCESSED_FILES_PATH", Path(os.getcwd()).resolve().parent / "converter" / "app" / "preprocessed")
 RAPIDOCR_MODELS_PATH = os.getenv("RAPIDOCR_MODELS_PATH", "")
 
 # Initialize state
@@ -57,7 +57,7 @@ st.write("Upload one or more PDF scans to convert them to text files. Then, you 
 uploaded_files = st.file_uploader("Upload Documents", type=["pdf"], accept_multiple_files=True)
 
 if uploaded_files is not None and len(uploaded_files) > 0:
-    paths = save_uploaded_files(os.getenv("UPLOADED_FILES_PATH", "/data/uploads"), uploaded_files)
+    paths = save_uploaded_files(UPLOADED_FILES_PATH, uploaded_files)
 
 run_text_conversion_button = st.button("Run text conversion", disabled=(uploaded_files is None or len(uploaded_files) == 0))
 
@@ -77,23 +77,24 @@ with preview_col1:
     if run_text_conversion_button and (uploaded_files is not None) and (len(uploaded_files) > 0):
         converter = PDFConverterAPIClient(base_url=os.getenv("CONVERTER_API_BASE_URL", "http://localhost:8001"))
         
-        zip_downloader = ZipDownloader(input_dir=Path(INDEXED_DOCS_PATH))
         with st.spinner("Converting documents..."):
             
             st.session_state.job_status = converter.convert_pdfs(
                 pdf_paths=paths,
-                pipeline_type=os.getenv("CONVERTER_PIPELINE_TYPE", "rapidocr"),
+                pipeline_type=os.getenv("CONVERTER_PIPELINE_TYPE", "macocr"),
                 wait=True
             )
             if st.session_state.job_status.status != "completed":
                 st.error(f"Conversion failed: {st.session_state.job_status.error}")
                 st.stop()
-            st.write(st.session_state.job_status.job_id)
+            st.write(f"Job ID: {st.session_state.job_status.job_id}")
             converted_documents = [(Path(INDEXED_DOCS_PATH) / st.session_state.job_status.job_id / f) for f in st.session_state.job_status.output_files]
             print(converted_documents)
             st.session_state.converted_documents = converted_documents
-            st.success("Documents converted successfully!")
-            st.download_button("Download Converted Documents", data=io.BytesIO(open(zip_downloader.zip_input_dir(), "rb").read()), file_name="converted_documents.zip", on_click="ignore")
+    if st.session_state.converted_documents is not None:
+        st.success("Documents converted successfully!")
+        zip_downloader = ZipDownloader(input_dir=Path(INDEXED_DOCS_PATH) / st.session_state.job_status.job_id)
+        st.download_button("Download Converted Documents", data=io.BytesIO(open(zip_downloader.zip_input_dir(), "rb").read()), file_name="converted_documents.zip", on_click="ignore")
 
 with preview_col2:
     if st.session_state.converted_documents != None:

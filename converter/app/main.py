@@ -33,10 +33,10 @@ for logger in loggers:
     logger.setLevel(logging.DEBUG)
 
 # Configuration
-UPLOAD_DIR = Path(os.getenv("UPLOADED_FILES_PATH", "/data/uploads"))
-OUTPUT_DIR = Path(os.getenv("INDEXED_DOCS_PATH", "/data/outputs"))
-PREPROCESS_DIR = Path(os.getenv("PREPROCESSED_FILES_PATH", "/data/preprocessed"))
-RAPIDOCR_MODELS_PATH = Path(os.getenv("RAPIDOCR_MODELS_PATH", "/data/rapidocr_models"))
+UPLOAD_DIR = Path(os.getenv("UPLOADED_FILES_PATH", "uploads"))
+OUTPUT_DIR = Path(os.getenv("INDEXED_DOCS_PATH", "outputs"))
+PREPROCESS_DIR = Path(os.getenv("PREPROCESSED_FILES_PATH", "preprocessed"))
+RAPIDOCR_MODELS_PATH = Path(os.getenv("RAPIDOCR_MODELS_PATH", "rapidocr_models"))
 
 # Ensure directories exist
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
@@ -159,6 +159,8 @@ async def process_conversion(
             service.init_docling_easyocr_pipeline()
         elif pipeline_type == "vlm":
             service.init_vlm_pipeline()
+        elif pipeline_type == "macocr":
+            service.init_macocr_pipeline()
         else:
             raise ValueError(f"Unknown pipeline type: {pipeline_type}")
         
@@ -211,7 +213,7 @@ async def health_check():
 async def convert_pdfs(
     background_tasks: BackgroundTasks,
     files: List[UploadFile] = File(..., description="PDF files to convert"),
-    pipeline_type: Literal["rapidocr", "suryaocr", "tesseract", "easyocr", "docling_easyocr", "vlm"] = "rapidocr"
+    pipeline_type: Literal["rapidocr", "suryaocr", "tesseract", "easyocr", "docling_easyocr", "vlm", "macocr"] = "rapidocr"
 ):
     """
     Upload and convert PDF files using the specified pipeline.
@@ -224,6 +226,7 @@ async def convert_pdfs(
         - `easyocr`: OCR pipeline using EasyOCR
         - `docling_easyocr`: OCR pipeline using Docling's EasyOCR integration
         - `vlm`: Vision Language Model pipeline
+        - `macocr`: OCR pipeline using MacOCR (if available)
     
     Returns a job_id that can be used to check status and download results.
     """
