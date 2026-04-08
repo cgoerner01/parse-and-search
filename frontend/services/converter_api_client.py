@@ -39,7 +39,7 @@ class PDFConverterAPIClient:
     def convert_pdfs(
         self,
         pdf_paths: List[Path],
-        pipeline_type: Literal["rapidocr", "suryaocr", "tesseract", "easyocr", "docling_easyocr", "vlm"] = "rapidocr",
+        pipeline_type: Literal["rapidocr", "suryaocr", "tesseract", "easyocr", "docling_easyocr", "vlm", "macocr", "glm-ocr", "deepseek-ocr"] = "rapidocr",
         wait: bool = False,
         poll_interval: float = 2.0,
         timeout: Optional[float] = None

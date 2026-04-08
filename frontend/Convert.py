@@ -54,6 +54,8 @@ st.title("PDF Scan to Text Converter")
 
 st.write("Upload one or more PDF scans to convert them to text files. Then, you can choose to index them to enable semantic search.")
 
+ocr_backend = st.selectbox("Select OCR Backend", options=["rapidocr", "suryaocr", "tesseract", "easyocr", "docling_easyocr", "vlm", "macocr", "glm-ocr", "deepseek-ocr"], index=0, help="Choose the OCR backend to use for text extraction. Currently, only RapidOCR is supported.")
+
 uploaded_files = st.file_uploader("Upload Documents", type=["pdf"], accept_multiple_files=True)
 
 if uploaded_files is not None and len(uploaded_files) > 0:
@@ -81,7 +83,8 @@ with preview_col1:
             
             st.session_state.job_status = converter.convert_pdfs(
                 pdf_paths=paths,
-                pipeline_type=os.getenv("CONVERTER_PIPELINE_TYPE", "macocr"),
+                #pipeline_type=os.getenv("CONVERTER_PIPELINE_TYPE", "rapidocr"),
+                pipeline_type=ocr_backend,
                 wait=True
             )
             if st.session_state.job_status.status != "completed":

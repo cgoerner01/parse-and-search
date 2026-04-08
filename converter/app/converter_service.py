@@ -1,13 +1,16 @@
 """
 Docling Converting Service - extracted from original code for use with FastAPI.
 """
-
+from abc import ABC, abstractmethod
 import os
 from pathlib import Path
 from docling_haystack.converter import DoclingConverter, ExportType
 from haystack import Pipeline, Document
 from haystack.components.preprocessors import DocumentCleaner, DocumentSplitter
 from haystack import component
+from haystack_integrations.components.generators.ollama import OllamaChatGenerator
+from haystack.dataclasses import ChatMessage, ImageContent, FileContent
+from haystack.components.converters.image import PDFToImageContent
 
 from docling.chunking import HybridChunker
 
@@ -49,21 +52,26 @@ import fitz
 
 import logging
 
+import httpx
+import base64
+
 loggers = [logging.getLogger(name) for name in logging.root.manager.loggerDict]
 for logger in loggers:
     logger.setLevel(logging.DEBUG)
 
 EMBED_MODEL_ID = os.getenv("EMBED_MODEL_ID", "intfloat/multilingual-e5-large-instruct")
 EXPORT_TYPE = ExportType.DOC_CHUNKS
-
+OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
+#OLLAMA_MODEL_OCR = os.getenv("OLLAMA_MODEL_OCR", "deepseek-ocr")
+OLLAMA_TIMEOUT = int(os.getenv("OLLAMA_TIMEOUT", "360"))
 
 @component
 class TextFileSaver:
     """Component to save document chunks to text files."""
     
     def __init__(self, output_dir: str):
-        self.output_dir = Path(output_dir)
-        self.output_dir.mkdir(parents=True, exist_ok=True)
+        self.output_dir = str(Path(output_dir))
+        Path(self.output_dir).mkdir(parents=True, exist_ok=True)
 
     @component.output_types(documents=list[Document])
     def run(self, documents: list[Document]):
@@ -82,7 +90,7 @@ class TextFileSaver:
 
         for source_file, contents in grouped.items():
             name = Path(source_file).stem
-            out_path = self.output_dir / f"{name}.txt"
+            out_path = Path(self.output_dir) / f"{name}.txt"
 
             with open(out_path, "w", encoding="utf-8") as f:
                 f.write("\n\n".join(contents))
@@ -95,8 +103,8 @@ class Deskewer:
     """Component to deskew PDF pages before OCR processing."""
     
     def __init__(self, output_dir: str):
-        self.output_dir = Path(output_dir)
-        self.output_dir.mkdir(parents=True, exist_ok=True)
+        self.output_dir = str(Path(output_dir))
+        Path(self.output_dir).mkdir(parents=True, exist_ok=True)
     
     def deskew(self, img):
         """Deskew a single image."""
@@ -134,50 +142,47 @@ class Deskewer:
         # Return original if no coords found
         return img
 
-    def getSkewAngle(self, img) -> float:
-        """
-        Calculate skew angle of an image.
-        Reference: https://becominghuman.ai/how-to-automatically-deskew-straighten-a-text-image-using-opencv-a0c30aed83df
-        """
-        # Prep image, copy, convert to gray scale, blur, and threshold
-        newImage = np.array(img)
-        gray = cv2.cvtColor(newImage, cv2.COLOR_BGR2GRAY)
-        blur = cv2.GaussianBlur(gray, (9, 9), 0)
-        thresh = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)[1]
+    def deskew_hough(self, img):
+        img_cv = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2GRAY)
+        edges = cv2.Canny(img_cv, 50, 150, apertureSize=3)
+        # Look for lines that represent text rows
+        lines = cv2.HoughLinesP(edges, 1, np.pi/180, 100, minLineLength=100, maxLineGap=10)
+        
+        angles = []
+        for line in lines:
+            x1, y1, x2, y2 = line[0]
+            angle = np.degrees(np.arctan2(y2 - y1, x2 - x1))
+            # Ignore purely vertical or extreme lines
+            if abs(angle) < 45:
+                angles.append(angle)
+                
+        return np.median(angles) if angles else 0
 
-        # Apply dilate to merge text into meaningful lines/paragraphs.
-        # Use larger kernel on X axis to merge characters into single line, cancelling out any spaces.
-        # But use smaller kernel on Y axis to separate between different blocks of text
-        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (30, 5))
-        dilate = cv2.dilate(thresh, kernel, iterations=5)
-
-        # Find all contours
-        contours, hierarchy = cv2.findContours(dilate, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
-        contours = sorted(contours, key=cv2.contourArea, reverse=True)
-
-        # Find largest contour and surround in min area box
-        largestContour = contours[0]
-        minAreaRect = cv2.minAreaRect(largestContour)
-
-        # Determine the angle. Convert it to the value that was originally used to obtain skewed image
-        angle = minAreaRect[-1]
-        if angle < -45:
-            angle = 90 + angle
-        return -1.0 * angle
-
-    def rotateImage(self, img, angle: float):
-        """Rotate the image around its center."""
-        newImage = np.array(img)
-        (h, w) = newImage.shape[:2]
+    def rotate_image(self, pil_img, angle):
+        """Rotates image and adds white padding to prevent data loss."""
+        img_cv = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
+        (h, w) = img_cv.shape[:2]
         center = (w // 2, h // 2)
+        
+        # Get rotation matrix
         M = cv2.getRotationMatrix2D(center, angle, 1.0)
-        newImage = cv2.warpAffine(newImage, M, (w, h), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE)
-        return Image.fromarray(newImage)
-
-    def deskew_old(self, img):
-        """Deskew image using alternative method."""
-        angle = self.getSkewAngle(img)
-        return self.rotateImage(img, -1.0 * angle)
+        
+        # Calculate new bounding box to prevent cropping corners
+        abs_cos = abs(M[0, 0])
+        abs_sin = abs(M[0, 1])
+        new_w = int(h * abs_sin + w * abs_cos)
+        new_h = int(h * abs_cos + w * abs_sin)
+        
+        M[0, 2] += (new_w / 2) - center[0]
+        M[1, 2] += (new_h / 2) - center[1]
+        
+        # Rotate with white background
+        rotated = cv2.warpAffine(img_cv, M, (new_w, new_h), 
+                                flags=cv2.INTER_CUBIC, 
+                                borderMode=cv2.BORDER_CONSTANT, 
+                                borderValue=(255, 255, 255))
+        
+        return Image.fromarray(cv2.cvtColor(rotated, cv2.COLOR_BGR2RGB))
     
     @component.output_types(paths=Iterable[Union[Path, str]])
     def run(self, paths: List[Path]):
@@ -204,10 +209,11 @@ class Deskewer:
             
             # Deskew each page
             for page in pages:
-                processed_pages.append(self.deskew(page))
+                #processed_pages.append(self.deskew(page))
+                processed_pages.append(self.rotate_image(page, self.deskew_hough(page)))
             
             # Save deskewed PDF
-            output_path = self.output_dir / Path(path).name
+            output_path = Path(self.output_dir) / Path(path).name
             if processed_pages:
                 processed_pages[0].save(
                     output_path, 
@@ -216,6 +222,41 @@ class Deskewer:
                     resolution=400.0
                 )
                 output_paths.append(output_path)
+        
+        return {"paths": output_paths}
+
+@component
+class PdfPrerenderer:
+    """
+    Re-renders every PDF page as a bitmap image before Docling sees it.
+    Forces Docling to treat all pages as image-only, preventing silent skips.
+    """
+    
+    def __init__(self, output_dir: str, dpi: int = 300):
+        self.output_dir = str(Path(output_dir))
+        Path(self.output_dir).mkdir(parents=True, exist_ok=True)
+        self.dpi = dpi
+
+    @component.output_types(paths=Iterable[Union[Path, str]])
+    def run(self, paths: List[Path]):
+        output_paths = []
+        
+        for path in paths:
+            output_path = Path(self.output_dir) / f"prerendered_{path.name}"
+            
+            src = fitz.open(path)
+            dst = fitz.open()
+            
+            for page in src:
+                pix = page.get_pixmap(dpi=self.dpi, colorspace=fitz.csRGB)
+                img_page = dst.new_page(width=pix.width, height=pix.height)
+                img_page.insert_image(img_page.rect, pixmap=pix)
+            
+            dst.save(output_path, deflate=True)
+            src.close()
+            dst.close()
+            
+            output_paths.append(output_path)
         
         return {"paths": output_paths}
 
@@ -271,17 +312,17 @@ class SuryaOCRConverter:
     """Component to convert PDFs using SuryaOCR."""
     
     def __init__(self, preprocess_dir: str = None):
-        self.preprocess_dir = preprocess_dir
+        self.preprocess_dir = str(Path(preprocess_dir))
         self.predictors = load_predictors()
     
     @component.output_types(documents=list[Document])
-    def run(self, paths: List[Path]):
+    def run(self, paths: Iterable[Union[Path, str]]):
         results = []
         for path in paths:
             pages = []
             with fitz.open(path) as doc:
                 for page in doc:
-                    pix = page.get_pixmap(dpi=300)
+                    pix = page.get_pixmap(dpi=200)
                     img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
                     res = self.predictors["recognition"](
                         [img],
@@ -310,6 +351,224 @@ class SuryaOCRConverter:
         
         return {"documents": output_docs}
 
+# Remove OllamaOCRConverter base class entirely.
+# Inline the shared `run()` and `encode_image()` logic as a mixin or helper function.
+
+def _encode_image(image_path: str) -> tuple[str, str]:
+    path = Path(image_path)
+    suffix = path.suffix.lower()
+    mime = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png"}.get(suffix, "image/jpeg")
+    with open(path, "rb") as f:
+        return base64.b64encode(f.read()).decode(), mime
+
+
+def _ollama_ocr_run(self, paths):
+    """Shared run logic for Ollama OCR converters."""
+    results = []
+    for path in paths:
+        pages = []
+        with fitz.open(path) as doc:
+            for page in doc:
+                pix = page.get_pixmap(dpi=150)
+                img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+                page_save_path = Path(self.preprocess_dir) / f"page_{Path(path).stem}_page{page.number+1}.jpg"
+                img.save(page_save_path)
+                res = self.ocr_image(str(page_save_path), mode="Text", host=OLLAMA_URL)
+                pages.append(res)
+        results.append(pages)
+
+    return {"documents": [
+        Document(
+            content='\n'.join(res),
+            meta={"source": str(Path(path).name)},
+        )
+        for res, path in zip(results, paths)
+    ]}
+
+
+@component
+class OllamaGLMOCRConverter:
+    def __init__(self, preprocess_dir: str = None, model_name: str = "glm-ocr"):
+        self.preprocess_dir = str(Path(preprocess_dir))
+        self.model_name = model_name
+
+    def encode_image(self, image_path):
+        return _encode_image(image_path)
+
+    def ocr_image(self, image_path, mode="Text", host=OLLAMA_URL):
+        image_data, _ = self.encode_image(image_path)
+        payload = {
+            "model": self.model_name,
+            "messages": [{"role": "user", "content": f"{mode} Recognition:", "images": [image_data]}],
+            "stream": False,
+            "options": {"temperature": 0.0, "top_k": 1, "top_p": 1.0, "repeat_penalty": 1.3, "num_ctx": 32000},
+        }
+        with httpx.Client(timeout=OLLAMA_TIMEOUT) as client:
+            response = client.post(f"{host}/api/chat", json=payload)
+            response.raise_for_status()
+            return response.json()["message"]["content"]
+
+    @component.output_types(documents=list[Document])
+    def run(self, paths: Iterable[Union[Path, str]]):
+        return _ollama_ocr_run(self, paths)
+
+
+@component
+class OllamaDeepSeekOCRConverter:
+    def __init__(self, preprocess_dir: str = None, model_name: str = "deepseek-ocr"):
+        self.preprocess_dir = str(Path(preprocess_dir))
+        self.model_name = model_name
+
+    def encode_image(self, image_path):
+        return _encode_image(image_path)
+
+    def ocr_image(self, image_path, mode="text", host=OLLAMA_URL):
+        image_data, _ = self.encode_image(image_path)
+        payload = {
+            "model": self.model_name,
+            "messages": [{"role": "user", "content": "\nFree OCR.", "images": [image_data]}],
+            "stream": False,
+            "options": {"temperature": 0.0, "top_k": 1, "top_p": 1.0, "repeat_penalty": 1.3},
+        }
+        with httpx.Client(timeout=OLLAMA_TIMEOUT) as client:
+            response = client.post(f"{host}/api/chat", json=payload)
+            response.raise_for_status()
+            return response.json()["message"]["content"]
+
+    @component.output_types(documents=list[Document])
+    def run(self, paths: Iterable[Union[Path, str]]):
+        return _ollama_ocr_run(self, paths)
+
+# class OllamaOCRConverter:
+#     """Component to convert PDFs using Ollama OCR."""
+    
+#     def __init__(self, preprocess_dir: str = None, model_name: str = "glm-ocr"):
+#         self.preprocess_dir = str(Path(preprocess_dir))
+#         self.model_name = model_name
+
+#     def encode_image(self, image_path: str) -> tuple[str, str]:
+#         path = Path(image_path)
+#         suffix = path.suffix.lower()
+#         mime = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png"}.get(suffix, "image/jpeg")
+#         with open(path, "rb") as f:
+#             return base64.b64encode(f.read()).decode(), mime
+
+#     def ocr_image(self, *args, **kwargs):
+#         raise NotImplementedError("Subclasses must implement ocr_image()")
+
+#     def run(self, paths: Iterable[Union[Path, str]]):
+#         results = []
+#         for path in paths:
+#             pages = []
+#             with fitz.open(path) as doc:
+#                 for page in doc:
+#                     pix = page.get_pixmap(dpi=150)
+#                     img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+#                     # save img to preprocess_dir
+#                     page_save_path = Path(self.preprocess_dir) / f"page_{Path(path).stem}_page{page.number+1}.jpg"
+#                     img.save(page_save_path)
+#                     # call ollama API
+#                     res = self.ocr_image(str(page_save_path), mode="Text", host=OLLAMA_URL)
+#                     pages.append(res)
+#                 results.append(pages)
+
+#         output_docs = []
+#         for res, path in zip(results, paths):
+#             output_docs.append(
+#                 Document(
+#                     content= '\n'.join(res),
+#                     meta={"source": str(Path(path).name)},
+#                 )
+#             )
+#         return {"documents": output_docs}
+
+# @component
+# class OllamaGLMOCRConverter(OllamaOCRConverter):
+#     """Component to convert PDFs using Ollama GLM-OCR."""
+    
+#     def __init__(self, preprocess_dir: str = None, model_name: str = "glm-ocr"):
+#         super().__init__(preprocess_dir, model_name=model_name)
+
+#     def ocr_image(
+#         self,
+#         image_path: str,
+#         mode: str = "Text",  # "Text", "Table", or "Figure"
+#         host: str = "http://ollama:11434",
+#     ) -> str:
+#         image_data, mime_type = self.encode_image(image_path)
+
+#         payload = {
+#             "model": self.model_name,
+#             "messages": [
+#                 {
+#                     "role": "user",
+#                     "content": f"{mode} Recognition:",
+#                     "images": [image_data],  # base64, no data URI prefix
+#                 }
+#             ],
+#             "stream": False,
+#             "options": {
+#                 "temperature": 0.0,
+#                 "top_k": 1,
+#                 "top_p": 1.0,
+#                 "repeat_penalty": 1.3,
+#                 "num_ctx": 32000,
+#             },
+#         }
+
+#         # Fresh client per call = no connection/session state leaking over
+#         with httpx.Client(timeout=OLLAMA_TIMEOUT) as client:
+#             response = client.post(f"{host}/api/chat", json=payload)
+#             response.raise_for_status()
+#             return response.json()["message"]["content"]
+    
+#     @component.output_types(documents=list[Document])
+#     def run(self, paths: Iterable[Union[Path, str]]):
+#         return super().run(paths)
+
+# @component
+# class OllamaDeepSeekOCRConverter(OllamaOCRConverter):
+#     """Component to convert PDFs using Ollama DeepSeek-OCR."""
+    
+#     def __init__(self, preprocess_dir: str = None, model_name: str = "deepseek-ocr"):
+#         super().__init__(preprocess_dir, model_name=model_name)
+
+#     def ocr_image(
+#         self,
+#         image_path: str,
+#         mode: str = "text",  # "text", "markdown", "layout", "figure", "extract"
+#         host: str = "http://ollama:11434",
+#     ) -> str:
+#         image_data, _ = self.encode_image(image_path)
+
+#         payload = {
+#             "model": self.model_name,
+#             "messages": [
+#                 {
+#                     "role": "user",
+#                     # DeepSeek-OCR expects: image + "\n" + instruction
+#                     "content": "\nFree OCR.",
+#                     "images": [image_data],
+#                 }
+#             ],
+#             "stream": False,
+#             "options": {
+#                 "temperature": 0.0,
+#                 "top_k": 1,
+#                 "top_p": 1.0,
+#                 "repeat_penalty": 1.3,
+#             },
+#         }
+
+#         with httpx.Client(timeout=120.0) as client:
+#             response = client.post(f"{host}/api/chat", json=payload)
+#             response.raise_for_status()
+#             return response.json()["message"]["content"]
+
+#     @component.output_types(documents=list[Document])
+#     def run(self, paths: Iterable[Union[Path, str]]):
+#         return super().run(paths)
+
 
 class DoclingConvertingService:
     """
@@ -337,10 +596,50 @@ class DoclingConvertingService:
             )
         else:
             print("Models already present, skipping download.")
+    
+    def init_ollama_glm_ocr_pipeline(self):
+        """Initialize OCR pipeline with Ollama DeepSeek OCR."""
+        self.convert_pipe.add_component(
+            "deskewer",
+            Deskewer(self.preprocess_dir)
+        )
+
+        self.convert_pipe.add_component(
+            "converter",
+            OllamaGLMOCRConverter(preprocess_dir=self.preprocess_dir, model_name="glm-ocr"),
+        )
+
+        self.convert_pipe.add_component(
+            "file_saver",
+            TextFileSaver(output_dir=self.output_dir),
+        )
+
+        self.convert_pipe.connect("deskewer", "converter")
+        self.convert_pipe.connect("converter", "file_saver")
+
+    def init_ollama_deepseek_ocr_pipeline(self):
+        """Initialize OCR pipeline with Ollama DeepSeek OCR."""
+        self.convert_pipe.add_component(
+            "deskewer",
+            Deskewer(self.preprocess_dir)
+        )
+
+        self.convert_pipe.add_component(
+            "converter",
+            OllamaDeepSeekOCRConverter(preprocess_dir=self.preprocess_dir, model_name="deepseek-ocr"),
+        )
+
+        self.convert_pipe.add_component(
+            "file_saver",
+            TextFileSaver(output_dir=self.output_dir),
+        )
+
+        self.convert_pipe.connect("deskewer", "converter")
+        self.convert_pipe.connect("converter", "file_saver")
 
     def init_rapidocr_pipeline(self):
         """Initialize OCR pipeline with RapidOCR."""
-        """
+        
         self.download_rapidocr_models()
 
         det_model_path = os.path.join(
@@ -363,6 +662,7 @@ class DoclingConvertingService:
         
         self.pipeline_options = PdfPipelineOptions(
             do_ocr=True,
+            do_table_structure=False,
             ocr_options=ocr_options,
         )
 
@@ -375,6 +675,16 @@ class DoclingConvertingService:
         )
 
         self.convert_pipe.add_component(
+            "deskewer",
+            Deskewer(self.preprocess_dir)
+        )
+
+        #self.convert_pipe.add_component(
+        #    "prerenderer",
+        #    PdfPrerenderer(output_dir=self.preprocess_dir, dpi=300),
+        #)
+
+        self.convert_pipe.add_component(
             "converter",
             DoclingConverter(
                 converter=self.doc_converter,
@@ -382,12 +692,12 @@ class DoclingConvertingService:
                 chunker=HybridChunker(tokenizer=EMBED_MODEL_ID, max_tokens=512),
             ),
         )
-        """
+        
 
-        self.convert_pipe.add_component(
-            "converter",
-            RapidOCRConverter(preprocess_dir=self.preprocess_dir),
-        )
+        #self.convert_pipe.add_component(
+        #    "converter",
+        #    RapidOCRConverter(preprocess_dir=self.preprocess_dir),
+        #)
 
         self.convert_pipe.add_component(
             "file_saver",
@@ -403,7 +713,7 @@ class DoclingConvertingService:
         #    "splitter",
         #    DocumentSplitter(split_by="word", split_length=384, split_overlap=10),
         #)
-
+        self.convert_pipe.connect("deskewer", "converter")
         self.convert_pipe.connect("converter", "file_saver")
         #self.convert_pipe.connect("file_saver", "cleaner")
         #self.convert_pipe.connect("cleaner", "splitter")
@@ -443,15 +753,37 @@ class DoclingConvertingService:
         )
         """
         self.convert_pipe.add_component(
+            "deskewer",
+            Deskewer(self.preprocess_dir)
+        )
+
+        self.convert_pipe.add_component(
             "converter",
             SuryaOCRConverter(preprocess_dir=self.preprocess_dir),
         )
+
+        #self.convert_pipe.add_component(
+        #    "cleaner",
+        #    DocumentCleaner(
+        #        remove_substrings=[
+        #            "999999 Elektronisches Dokument",
+        #            "Keine Archivierung des Ausdrucks am UKHD"
+        #        ],
+        #        replace_regexes={
+        #            r'Ausdruck aus.* Unterbelegart:.*(riefe|richte)' : '',
+        #            r'Gedruckte Seiten.*Datum: \d{2}\.\d{2}\.\d{4}' : '',
+        #        }
+        #    ),
+        #)
 
         self.convert_pipe.add_component(
             "file_saver",
             TextFileSaver(output_dir=self.output_dir),
         )
+
+        self.convert_pipe.connect("deskewer", "converter")
         self.convert_pipe.connect("converter", "file_saver")
+        #self.convert_pipe.connect("cleaner", "file_saver")
     
     def init_macocr_pipeline(self):
         """Initialize OCR pipeline with MacOCR."""
@@ -474,6 +806,11 @@ class DoclingConvertingService:
         )
 
         self.convert_pipe.add_component(
+            "deskewer",
+            Deskewer(self.preprocess_dir)
+        )
+
+        self.convert_pipe.add_component(
             "converter",
             DoclingConverter(
                 converter=self.doc_converter,
@@ -482,27 +819,27 @@ class DoclingConvertingService:
             ),
         )
 
-        self.convert_pipe.add_component(
-            "cleaner",
-            DocumentCleaner(
-                remove_substrings=[
-                    "999999 Elektronisches Dokument",
-                    "Keine Archivierung des Ausdrucks am UKHD"
-                ],
-                replace_regexes={
-                    r'Ausdruck aus.* Unterbelegart:.*(riefe|richte)' : '',
-                    r'Gedruckte Seiten.*Datum: \d{2}\.\d{2}\.\d{4}' : '',
-                }
-            ),
-        )
+        #self.convert_pipe.add_component(
+        #    "cleaner",
+        #    DocumentCleaner(
+        #        remove_substrings=[
+        #            "999999 Elektronisches Dokument",
+        #            "Keine Archivierung des Ausdrucks am UKHD"
+        #        ],
+        #        replace_regexes={
+        #            r'Ausdruck aus.* Unterbelegart:.*(riefe|richte)' : '',
+        #            r'Gedruckte Seiten.*Datum: \d{2}\.\d{2}\.\d{4}' : '',
+        #        }
+        #    ),
+        #)
 
         self.convert_pipe.add_component(
             "file_saver",
             TextFileSaver(output_dir=self.output_dir),
         )
 
-        self.convert_pipe.connect("converter", "cleaner")
-        self.convert_pipe.connect("cleaner", "file_saver")
+        self.convert_pipe.connect("deskewer", "converter")
+        self.convert_pipe.connect("converter", "file_saver")
     
     def init_docling_easyocr_pipeline(self):
         """Initialize OCR pipeline with Docling's EasyOCR integration."""
@@ -524,6 +861,11 @@ class DoclingConvertingService:
         )
 
         self.convert_pipe.add_component(
+            "deskewer",
+            Deskewer(self.preprocess_dir)
+        )
+
+        self.convert_pipe.add_component(
             "converter",
             DoclingConverter(
                 converter=self.doc_converter,
@@ -537,6 +879,7 @@ class DoclingConvertingService:
             TextFileSaver(output_dir=self.output_dir),
         )
 
+        self.convert_pipe.connect("deskewer", "converter")
         self.convert_pipe.connect("converter", "file_saver")
     
     def init_easyocr_pipeline(self):
@@ -560,6 +903,11 @@ class DoclingConvertingService:
         )
 
         self.convert_pipe.add_component(
+            "deskewer",
+            Deskewer(self.preprocess_dir)
+        )
+
+        self.convert_pipe.add_component(
             "converter",
             DoclingConverter(
                 converter=self.doc_converter,
@@ -573,6 +921,7 @@ class DoclingConvertingService:
             TextFileSaver(output_dir=self.output_dir),
         )
 
+        self.convert_pipe.connect("deskewer", "converter")
         self.convert_pipe.connect("converter", "file_saver")
 
     def init_tesseract_pipeline(self):
@@ -639,6 +988,11 @@ class DoclingConvertingService:
         )
 
         self.convert_pipe.add_component(
+            "deskewer",
+            Deskewer(self.preprocess_dir)
+        )
+
+        self.convert_pipe.add_component(
             "converter",
             DoclingConverter(
                 converter=self.doc_converter,
@@ -652,6 +1006,7 @@ class DoclingConvertingService:
             TextFileSaver(output_dir=self.output_dir),
         )
 
+        self.convert_pipe.connect("deskewer", "converter")
         self.convert_pipe.connect("converter", "file_saver")
     
     
@@ -666,5 +1021,10 @@ class DoclingConvertingService:
         Returns:
             Pipeline execution result
         """
-        res = self.convert_pipe.run({"converter": {"paths": paths}})
+        #res = self.convert_pipe.run({"converter": {"paths": paths}})
+        # if deskewer not in pipeline
+        if "deskewer" not in list(self.convert_pipe.to_dict()['components'].keys()):
+            res = self.convert_pipe.run({"converter": {"paths": paths}})
+        else:
+            res = self.convert_pipe.run({"deskewer": {"paths": paths}})
         return res

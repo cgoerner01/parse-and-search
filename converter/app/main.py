@@ -28,7 +28,6 @@ logging.basicConfig(
 )
 
 loggers = [logging.getLogger(name) for name in logging.root.manager.loggerDict]
-print(loggers)
 for logger in loggers:
     logger.setLevel(logging.DEBUG)
 
@@ -126,10 +125,9 @@ async def process_conversion(
 ):
     """Background task to process PDF conversion."""
     try:
-        logging.getLogger("haystack").debug("HAYSTACK DEBUG TEST")
-        print("PRINT TEST")
+        logging.getLogger("haystack").debug("HAYSTACK DEBUG")
         print(f"pipeline_type: {pipeline_type}")
-        print(pipeline_type == "rapidocr")
+        
         jobs_db[job_id]["status"] = "processing"
         
         # Create job-specific output directory
@@ -161,6 +159,10 @@ async def process_conversion(
             service.init_vlm_pipeline()
         elif pipeline_type == "macocr":
             service.init_macocr_pipeline()
+        elif pipeline_type == "glm-ocr":
+            service.init_ollama_glm_ocr_pipeline()
+        elif pipeline_type == "deepseek-ocr":
+            service.init_ollama_deepseek_ocr_pipeline()
         else:
             raise ValueError(f"Unknown pipeline type: {pipeline_type}")
         
@@ -213,7 +215,7 @@ async def health_check():
 async def convert_pdfs(
     background_tasks: BackgroundTasks,
     files: List[UploadFile] = File(..., description="PDF files to convert"),
-    pipeline_type: Literal["rapidocr", "suryaocr", "tesseract", "easyocr", "docling_easyocr", "vlm", "macocr"] = "rapidocr"
+    pipeline_type: Literal["rapidocr", "suryaocr", "tesseract", "easyocr", "docling_easyocr", "vlm", "macocr", "glm-ocr", "deepseek-ocr"] = "rapidocr"
 ):
     """
     Upload and convert PDF files using the specified pipeline.
@@ -227,7 +229,8 @@ async def convert_pdfs(
         - `docling_easyocr`: OCR pipeline using Docling's EasyOCR integration
         - `vlm`: Vision Language Model pipeline
         - `macocr`: OCR pipeline using MacOCR (if available)
-    
+        - `glm-ocr`: OCR pipeline using GLM-OCR
+        - `deepseek-ocr`: OCR pipeline using DeepSeek-OCR
     Returns a job_id that can be used to check status and download results.
     """
     # Validate files
